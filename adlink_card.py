@@ -78,7 +78,6 @@ class Axis:
         self.id = axis_id
         self.card_id = card_id
         self.setInterruptFactor(InterruptFactor.WHEN_TRIGGER_COMPARATOR_CONDITIONS_ARE_MET)
-        self.setInterruptControl(True)
 
     def setPosition(self, position):
         """Set the encoder position returned by the card."""
@@ -98,18 +97,15 @@ class Axis:
         """Set the encoder position to compare with in order to generate a trigger."""
         self.dll._8102_set_trigger_comparator(self.id, source, method, int(data))
 
-    def setInterruptControl(self, int_control=True):
-        """Enable/disable the Windows interrupt control for the card."""
-        self.dll._8102_int_control(self.card_id, int(int_control))
-
     def waitForInterrupt(self, int_factor_bit, timeout=10000):
         """Wait for the encoder to generate a trigger event. Timeout in milliseconds."""
         self.dll._8102_wait_motion_interrupt(self.id, int(int_factor_bit), int(timeout))
 
     def waitForPosition(self, position, timeout=10000):
         """Wait for the encoder to reach a given position. Timeout in milliseconds."""
-        self.setTriggerPosition(ComparingSource.FEEDBACK_COUNTER,
-                                CompareMethod.DATA_EQ_SOURCE_COUNTER_DIRECTION_INDEPENDENT, position)
+        # Which way are we moving?
+        method = CompareMethod.DATA_GT_SOURCE_COUNTER if position < self.getPosition() else CompareMethod.DATA_LT_SOURCE_COUNTER
+        self.setTriggerPosition(ComparingSource.FEEDBACK_COUNTER, method, position)
         self.waitForInterrupt(log2(InterruptFactor.WHEN_TRIGGER_COMPARATOR_CONDITIONS_ARE_MET), timeout)
 
 
@@ -143,4 +139,25 @@ class AdlinkCard:
         dll._8102_initial(card_id, 0)
         dll._8102_config_from_file()  # set from C:\Windows\System32\8102.ini - use MotionCreatorPro to alter
 
-        self.axis = {'z': Axis(dll, 0, card_id=0)}
+        # Enable the Windows interrupt control for the card
+        dll._8102_int_control(0, int(True))
+
+        self.axis = {'z': Axis(dll, 0, card_id=0),
+                     'x': Axis(dll, 1, card_id=0)}
+
+
+if __name__ == '__main__':
+    import motor_controller
+    mc = motor_controller.MotorController()
+    ad8102 = AdlinkCard()
+    for axis_name in 'x':#, 'z':
+        axis = mc.axis[axis_name]
+        enc_axis = ad8102.axis[axis_name]
+        encoder_pos = axis.get_position(set_value=False) * axis.scale_factor
+        print('\n', axis_name, 'encoder position (from MC):', encoder_pos)
+        enc_axis.setPosition(encoder_pos)
+        move_amount = 1
+        print('moving by', move_amount)
+        axis.move(move_amount, relative=True, wait=True, tolerance=0.001)
+        print('MC  pos', axis.get_position(set_value=False) * axis.scale_factor)
+        print('enc pos', enc_axis.getPosition())

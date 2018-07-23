@@ -38,6 +38,9 @@ class Axis:
              multi_line: bool = False, check_ok: bool = False):
         """Send a command to the motor controller and wait for a response."""
         command = command.lower()
+        # Coerce floats to ints (assuming there aren't any float-type commands!)
+        if isinstance(parameter, float):
+            parameter = round(parameter)
         send = '{}{}{}'.format(self.id, command, parameter)
         self.serial_port.write(send.encode('utf-8') + b'\r\n')
         reply = ''
