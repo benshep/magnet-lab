@@ -15,7 +15,9 @@ class MissedTriggerError(Exception):
 def arange(start, stop=None, step=1.0):
     """Use numpy's arange with a slightly higher stop value to ensure the specified stop value is included.
     If no stop value is specified, just return a length-1 array containing only the start value."""
-    return np.array([start]) if stop is None else np.arange(start, stop + 0.002, step)
+    if stop is not None:
+        step = np.copysign(step, stop - start)
+    return np.array([start]) if stop is None else np.arange(start, stop + np.copysign(0.002, stop - start), step)
 
 
 class LineScan:

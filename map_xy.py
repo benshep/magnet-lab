@@ -12,7 +12,7 @@ from collections import OrderedDict
 
 def scan_range(arg) -> List:
     l = [x if i == 0 else float(x) for i, x in enumerate(arg.replace('=', ',').split(','))]
-    if len(l) not in (2, 3, 4) or l[0].lower() not in ('x', 'y', 'z'):
+    if len(l) not in (2, 3, 4) or l[0].lower() not in ('x', 'y', 'z', 's'):
         raise argparse.ArgumentTypeError(f"Can't interpret range specifier {arg}")
     return l
 
@@ -43,12 +43,17 @@ for i, scan in enumerate(scans):
 
 mc = motor_controller.MotorController()
 line_scan = hp_line_scan.LineScan(*scans[0], mc=mc)
-# Are the other axes specified?
+# Are the other axes specified? If not, add them as a 'scan' in a single position
 scan_dirs = {scan[0] for scan in scans}
 dirs = {'x', 'y', 'z'}
 unlisted_dirs = dirs - scan_dirs
 for direction in unlisted_dirs:
-    scans.append([direction, 1.234])
+    scans.append([direction, mc.axis[direction].get_position()])
+
+# Using the ZEPTO dipole with a 'stroke' axis?
+if 's' in scan_dirs:
+    dipole_ctrl = motor_controller.ZeptoDipoleController()
+    mc.axis['s'] = dipole_ctrl.axis  # this is perhaps a little hacky, but should work
 
 # Convert each remaining scan specification into a tuple of ('axis_name', array([val1, val2, ...]) )
 scans = [(scan[0], hp_line_scan.arange(*scan[1:])) for scan in scans[1:]]
@@ -73,8 +78,9 @@ comment = args.comment
 
 # Set up the scan
 hp = line_scan.hp
-field_units = 'mT'
+field_units = 'T'
 hp.setUnits(field_units)
+hp.setRange(3.0)  # TODO: add to options
 
 # Produce a header for the file(s)
 header = [('Date/time', datetime.now().strftime('%d/%m/%y %H:%M:%S')),
@@ -99,7 +105,8 @@ out_file = open(args.file, 'a') if args.file else sys.stdout
 [print(*l, sep=',', file=out_file) for l in header if l]
 print(f'{columns},Bx [{field_units}],By [{field_units}],Bz [{field_units}]', file=out_file)
 
-assert len(scan_dict) == 2  # we should have two axes to scan over
+# we should have two or three axes to scan over (e.g. X, Y, and stroke, with a LineScan in Z)
+assert len(scan_dict) in (2, 3)
 scan_index = 0
 start = datetime.now()
 eta = None
@@ -108,42 +115,54 @@ axis2 = list(scan_dict)[0]
 ax2_values = scan_dict[axis2]
 axis3 = list(scan_dict)[1]
 ax3_values = scan_dict[axis3]
-n_line_scans = len(ax2_values) * len(ax3_values)
+if len(scan_dict) >= 3:
+    axis4 = list(scan_dict)[2]
+    ax4_values = scan_dict[axis4]
+else:
+    axis4 = None
+    ax4_values = [0]
 
-for j, z in enumerate(ax3_values):
-    print(f'{axis3} = {z} mm')
-    # mc.axis[axis3].move(z, wait=True)
+n_line_scans = len(ax2_values) * len(ax3_values) * len(ax4_values)
 
-    # Run the scan, invoking line_scan for each position along axis 2
-    for i, y in enumerate(ax2_values):
-        if i > 0:
-            progress = i / n_line_scans
-            elapsed = datetime.now() - start
-            eta = start + elapsed / progress
-        print(f'{axis2} = {y} mm' + (eta.strftime(', ETA %H:%M') if eta else ''))
-        # mc.axis[axis2].move(y, wait=True)
-        tries = 0
-        ok = False
-        while not ok:
-            try:
-                # line_scan.run()
-                ok = True
-            except (hp_line_scan.MissedTriggerError, EncoderException) as e:  # sometimes we get a little hiccup
-                line_scan.axis.stop()
-                tries += 1
-                print(e)
-                if tries % 5 == 0 and input(f'Scan failed after {tries} tries. Try again? [Y/n]').upper() not in ('', 'Y'):
-                    raise  # break out
-        line_scan.field_values = np.random.rand(len(line_scan.pos_values), 3) - 0.5
+for k, s in enumerate(ax4_values):
+    if axis4 is not None:
+        print(f'{axis4} = {s} mm')
+        mc.axis[axis4].move(s, wait=True)
 
-        # Record the data in the file(s)
-        pos_vector = [z] if len(ax3_values) > 1 else []
-        if len(ax2_values) > 1:
-            pos_vector.append([y])
-        for column, (x, field) in enumerate(zip(line_scan.pos_values, line_scan.field_values)):
-            print([f'{p:.3f}' for p in np.concatenate([[y, x], field])], sep=',', file=out_file, flush=True)
+    for j, z in enumerate(ax3_values):
+        print(f'{axis3} = {z} mm')
+        mc.axis[axis3].move(z, wait=True)
 
-        # Save as we go along in case of unforeseen errors
-        out_file.flush()
+        # Run the scan, invoking line_scan for each position along axis 2
+        for i, y in enumerate(ax2_values):
+            if i > 0:
+                progress = i / n_line_scans
+                elapsed = datetime.now() - start
+                eta = start + elapsed / progress
+            print(f'{axis2} = {y} mm' + (eta.strftime(', ETA %H:%M') if eta else ''))
+            mc.axis[axis2].move(y, wait=True)
+            tries = 0
+            ok = False
+            while not ok:
+                try:
+                    line_scan.run()
+                    ok = True
+                except (hp_line_scan.MissedTriggerError, EncoderException) as e:  # sometimes we get a little hiccup
+                    line_scan.axis.stop()
+                    tries += 1
+                    print(e)
+                    if tries % 5 == 0 and input(f'Scan failed after {tries} tries. Try again? [Y/n]').upper() not in ('', 'Y'):
+                        raise  # break out
+            # line_scan.field_values = np.random.rand(len(line_scan.pos_values), 3) - 0.5  # for testing!
+
+            # Record the data in the file(s)
+            pos_vector = [z] if len(ax3_values) > 1 else []
+            if len(ax2_values) > 1:
+                pos_vector.append([y])
+            for column, (x, field) in enumerate(zip(line_scan.pos_values, line_scan.field_values)):
+                print(','.join([f'{p:.5f}' for p in np.concatenate([[y, x], field])]), file=out_file, flush=True)
+
+            # Save as we go along in case of unforeseen errors
+            out_file.flush()
 
 out_file.close()

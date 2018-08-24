@@ -34,6 +34,9 @@ class MetrolabProbe:
         if not self.probe.manufacturer_name == 'Metrolab Technology SA':
             raise CommunicationError(f'resource at address {resource_name} is not a Metrolab probe - manufacturer is "{self.probe.manufacturer_name}"')
 
+        # set longer timeout (default is 2s)
+        self.probe.timeout = 10000
+
         # get range information
         ranges = self.probe.query(':SENS:ALL?;').split(',')  # ['0.1 T', '0.5 T', ... ]
         range_list, unit_list = list(zip(*[rt.split(' ') for rt in ranges]))  # separate out numbers and units
@@ -106,7 +109,7 @@ class MetrolabProbe:
                     r = new_r
                 except StopIteration:
                     raise InputError(f'range {r} is above maximum range {self.ranges[-1]} of probe')
-            self.send(f':SENS {r}')
+            self.send(f':SENS {r:.2g}')  # ensures correct text format: 0.1, 0.5, 3, 20
             self.range = r
 
     def getField(self, direction='all', digits=5, count=1, fetch=False):

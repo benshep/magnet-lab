@@ -17,8 +17,7 @@ class OutOfRangeException(Exception):
 
 
 class Axis:
-    def __init__(self, serial_port, axis_id, scale_factor, max_speed, acceleration,
-                 axis_type='linear', version='PM341'):
+    def __init__(self, serial_port, axis_id, scale_factor, max_speed, acceleration, axis_type='linear', version='PM341'):
         """Initialise axis with some parameters."""
         self.serial_port = serial_port
         self.id = axis_id  # axis id number starting with 1
@@ -31,47 +30,70 @@ class Axis:
         # What prefix do we expect to see on responses? PM341: 01# etc. PM600: 10: etc. PM304: nothing
         if version == 'PM304':
             self.prefix = ''
+        elif version == 'SCL':
+            self.prefix = str(self.id)
         else:
             self.prefix = '{:02d}{}'.format(self.id, '#' if version == 'PM341' else ':')
+        self.line_end = b'\r' if version == 'SCL' else b'\r\n'
+        self.echo = version != 'SCL'
 
     def talk(self, command: str, parameter: Union[str, int, float] = '',
              multi_line: bool = False, check_ok: bool = False):
         """Send a command to the motor controller and wait for a response."""
-        command = command.lower()
+        command = command.upper()  # need upper for SCL, other versions don't care
         # Coerce floats to ints (assuming there aren't any float-type commands!)
         if isinstance(parameter, float):
             parameter = round(parameter)
         send = '{}{}{}'.format(self.id, command, parameter)
-        self.serial_port.write(send.encode('utf-8') + b'\r\n')
+        self.serial_port.write(send.encode('utf-8') + self.line_end)
         reply = ''
-        while reply.count('\r\n') < 2:
+        while reply.count(self.line_end.decode('utf-8')) < (2 if self.echo else 1):
             sleep(2 if command.lower() in ('qa', 'he', 'hc') else 0.2)  # longer for certain commands
-            reply += self.serial_port.read_all().decode("utf-8")
+            reply += self.serial_port.read_all().decode('utf-8')
         lines = reply.splitlines()
-        if not lines[0] == send:  # check the command echo
-            # maybe retry?
-            raise ValueError('Incorrect command echo: sent "{}", received "{}"'.format(send, lines[0]))
-        if check_ok and not lines[1] == self.prefix + 'OK':
-            raise ValueError('Error response on command "{}": received "{}"'.format(send, lines[1]))
-        return lines[1:] if multi_line else lines[1]
+        if self.echo:
+            echo = lines.pop(0)
+            if not echo == send:  # check the command echo
+                # maybe retry?
+                raise ValueError('Incorrect command echo: sent "{}", received "{}"'.format(send, echo))
+        if check_ok and not lines[0] == self.prefix + ('%' if self.version == 'SCL' else 'OK'):
+            raise ValueError('Error response on command "{}": received "{}"'.format(send, lines[0]))
+        return lines if multi_line else lines[0]
 
     def get_position(self, set_value=True):  # ask for the set value by default, otherwise the read value
         """Query the motor controller for the axis position (set or read)."""
-        reply = self.talk('oc' if set_value else 'oa')  # "output command", "output actual"
+        if self.version == 'SCL':
+            command = 'ie'  # TODO: set position?
+        else:
+            command = 'oc' if set_value else 'oa'  # "output command", "output actual"
+        reply = self.talk(command)  # "output command", "output actual"
         # reply should begin either CP=, AP= or 01#, 02#, ...
         if self.version == 'PM304':
             prefix = 'CP=' if set_value else 'AP='
         else:
             prefix = self.prefix
-        if not reply[:3] == prefix:
+        if not reply.startswith(prefix):
             raise ValueError('Bad reply from axis {}: "{}" does not begin "{}"'.format(self.id, reply, prefix))
-        return int(reply[3:]) / self.scale_factor
+        answer = reply[4:] if self.version == 'SCL' else reply[3:]
+        try:
+            value = int(answer)
+        except ValueError:
+            value = 0
+        return value / self.scale_factor
 
-    def move(self, position, relative=False, wait=False, tolerance=0.01, timeout=60):
+    def move(self, position, relative=False, wait=False, tolerance=0.01, timeout='auto'):
         """Instruct the motor controller to move the axis by the specified amount."""
-        final_pos = position + (self.get_position() if relative else 0)
+        init_pos = self.get_position()
+        final_pos = position + (init_pos if relative else 0)
+        if wait and timeout == 'auto':
+            timeout = abs(final_pos - init_pos) / self.max_speed + 30  # allow extra time  # TODO: should query speed
+
         steps = int(position * self.scale_factor)
-        self.talk('mr' if relative else 'ma', steps, check_ok=True)  # "move relative", "move absolute"
+        if self.version == 'SCL':
+            command = 'fl' if relative else 'fp'  # "feed to length", "feed to position"
+        else:
+            command = 'mr' if relative else 'ma'  # "move relative", "move absolute"
+        self.talk(command, steps, check_ok=True)
         if wait:
             start = time()
             sleep(0.1)
@@ -82,6 +104,7 @@ class Axis:
             # sleep(0.2)  # extra delay so we don't confuse the controller
 
     def stop(self):
+        """Stop the motor immediately."""
         self.talk('st')  # "stop"
 
     def resetPosition(self, position=0):
@@ -187,3 +210,20 @@ class MotorController:
 
     def __del__(self):
         self.close()
+
+
+class ZeptoDipoleController(MotorController):
+    def __init__(self):
+        serial_port = serial.Serial()
+        self.serial_port = serial_port
+        serial_port.port = 'COM8'
+        serial_port.bytesize = 8
+        serial_port.parity = serial.PARITY_NONE
+        serial_port.open()
+
+        # speed is 2 rev/s (VE command)
+        # accel is 50 rev/s/s (AC command)
+        # 20000 steps/rev
+        # 240000 steps/mm
+        # so speed = 1/6 mm/s, accel = 50 / 12 mm/s/s
+        self.axis = Axis(serial_port, 1, -240000, 1/6, 50/12, version='SCL')
